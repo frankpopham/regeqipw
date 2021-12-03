@@ -1,0 +1,127 @@
+---
+title: "Regression weights can equal inverse probability weights"
+author:
+  - name: Frank Popham 
+    url: https://www.frankpopham.com
+date: "`r Sys.Date()`"
+output: distill::distill_article
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(simstudy)
+library(WeightIt)
+library(gt)
+```
+
+Among other work, papers in [political science](https://onlinelibrary.wiley.com/doi/abs/10.1111/ajps.12185), [epidemiology](https://journals.lww.com/epidem/Fulltext/2018/09000/Assessing_Confounder_Balance_in_Outcome.27.aspx), and [statistics](https://arxiv.org/abs/2104.06581) have highlighted that linear regression is a weighting estimator. Alastair Leyland and I showed that given no effect modification regression weights are the equivalent of inverse probability weights for a binary exposure. Thus a draw back for regression is that without interaction terms it may not represent the target population. This body of work also shows that linear regression weights are not dependent on the outcome. This also connects linear regression to causal adjustment methods where there is an emphasis on control for confounding by modelling the exposure rather than the outcome.
+
+One thing I struggled with was adding effect modification in the regression framework as you didn't then have a single weight for the exposure . The solution, I think, is [centring confounders](https://twitter.com/noah_greifer/status/1451578667457413124). The table below shows how two unbalanced binary confounders and their interaction were unbalanced over levels of the exposure in the observed data . The target on which to balance was the confounders' average in the data, in other words the average treatment effect. A standard regression - where we enter on the right-hand side the exposure and the two confounders but not their interactions - does balance the confounders but not at their target value and does not balance their interaction. If I centre the confounders and their interaction and then interact all the variables on the right hand side of my linear regression I can balance the confounders and their interaction using the regression weight. The final two lines show that I can do the same using inverse probability weights derived from a regression with the exposure as the outcome and the confounders and their interaction on the right side.
+
+```{r example, include}
+
+#first example
+
+def <- defData(varname = "c1", dist="binary", formula = .1, link = "identity")
+def <- defData(def, varname = "c2", dist = "binary", formula = .2, link = "identity")
+def <- defData(def, varname = "x", dist = "binary",
+               formula = ".1 + c2 * .2 + c1 * 0.1", link = "identity")
+def <- defData(def, varname = "y", dist = "binary",
+               formula = ".1+x*.1+c2*.2 + c1 * 0.05", link = "identity")
+set.seed(362492)
+df <- genData(10000, def)
+
+
+#######
+
+df <- df %>%
+  mutate(ctimes=c1*c2)
+
+target <- df %>%
+  summarise(across(c(c1, c2, ctimes), mean))
+
+target2 <- df %>%
+  group_by(x) %>%
+  summarise(across(c(c1, c2, ctimes), mean))
+
+
+ipws <- weightit(x~c1*c2, data=df)
+
+df <- df %>%
+  mutate(ipw=abs(ipws$weights))
+
+bal <- df %>%
+  group_by(x) %>%
+  summarise(across(c(c1,c2, ctimes), ~weighted.mean(.x, ipw)))
+
+
+X <- model.matrix(~factor(x)*(scale(c1, scale=F)+scale(c2, scale=F)+scale(ctimes, scale=F)), data=df)
+
+W <-solve(crossprod(X, X))%*%t(X)
+Wt <- as_tibble(t(W))
+
+df <- mutate(df, w_x=Wt$`factor(x)1`)
+
+
+
+
+X2 <- model.matrix(~factor(x)+c1+c2, data=df)
+
+W2 <-solve(crossprod(X2, X2))%*%t(X2)
+Wt2 <- as_tibble(t(W2))
+
+df <- mutate(df, w_x2=Wt2$`factor(x)1`)
+
+bal2 <- df %>%
+  group_by(x) %>%
+  summarise(across(c(c1,c2, ctimes), ~weighted.mean(.x, w_x)))
+
+bal3 <- df %>%
+  group_by(x) %>%
+  summarise(across(c(c1,c2, ctimes), ~weighted.mean(.x, w_x2)))
+
+
+balance <- map_dfr(list("Observed data"=target2, Target=target, 
+                        "Regression weight"=bal3, 
+                        "Reg weight interaction"=bal2, 
+                        IPW=bal), ~.x, .id="what") %>%
+  rename(Exposure=x,
+         "Confounder 1"=c1,
+         "Confounder 2"=c2,
+         "Their interaction"=ctimes)
+
+
+gt(balance) %>%
+    cols_label(
+    what = " ",
+  ) %>%
+  tab_spanner(
+    label = "Confounder balance",
+    columns = c("Confounder 1",	"Confounder 2",	"Their interaction")
+  ) %>%
+  fmt_number(
+  c("Confounder 1",	"Confounder 2",	"Their interaction"),
+  rows = everything(),
+  decimals = 4 
+  ) %>%
+  cols_align(
+  align = c("center"),
+  columns = -what
+)
+
+
+
+```
+
+#### Technical stuff
+
+You can represent a linear regression in terms of matrices. The X matrix contains your right hand side variables (exposure, confounders) while your outcome is in the Y matrix. We then obtain our regression coefficients via the equation .$$(X'X)^{-1}X'Y$$
+
+Without getting in to the details of matrix algebra if you exclude Y, then $$(X'X)^{-1}X$$
+
+gives you a weight variable for each variable in X. Given a binary exposure weights will sum to -1 and 1 over the two categories.
+
+Mega thanks to [tidyverse](https://www.tidyverse.org), [simstudy](https://kgoldfeld.github.io/simstudy/index.html), [gt](https://gt.rstudio.com/) and [WeightIt](https://github.com/ngreifer/WeightIt) packages used in this blog and [knitr](https://cran.r-project.org/web/packages/knitr/index.html), [distill](https://rstudio.github.io/distill/), [R](https://www.r-project.org/), and [Rstudio](https://www.rstudio.com/) that allow me to produce the blog.
+
+[Code](https://github.com/frankpopham/regeqipw) to reproduce this blog and analysis.
